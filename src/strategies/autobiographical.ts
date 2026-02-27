@@ -79,6 +79,15 @@ export class AutobiographicalStrategy implements ContextStrategy {
 
   async onNewMessage(message: StoredMessage, ctx: StrategyContext): Promise<void> {
     this.rebuildChunks(ctx.messageStore);
+
+    // Auto-tick: fire compression in the background so it runs without
+    // the framework explicitly calling tick(). compile() will await
+    // pendingCompression via checkReadiness().
+    if (this.config.autoTickOnNewMessage && this.compressionQueue.length > 0 && !this.pendingCompression) {
+      this.tick(ctx).catch((err) =>
+        console.error('AutobiographicalStrategy: auto-tick error:', err)
+      );
+    }
   }
 
   async tick(ctx: StrategyContext): Promise<void> {
@@ -117,8 +126,26 @@ export class AutobiographicalStrategy implements ContextStrategy {
     const entries: ContextEntry[] = [];
     const maxTokens = budget.maxTokens - budget.reserveForResponse;
     let totalTokens = 0;
+    const messages = store.getAll();
 
-    // First, add compressed chunks as diary pairs
+    // 1. Head window: preserved verbatim as raw copies
+    const headEnd = this.getHeadWindowEnd(store);
+    for (let i = 0; i < headEnd && i < messages.length; i++) {
+      const msg = messages[i];
+      const tokens = store.estimateTokens(msg);
+      if (totalTokens + tokens > maxTokens) break;
+
+      entries.push({
+        index: entries.length,
+        sourceMessageId: msg.id,
+        sourceRelation: 'copy',
+        participant: msg.participant,
+        content: msg.content,
+      });
+      totalTokens += tokens;
+    }
+
+    // 2. Compressed chunks as diary pairs
     for (const chunk of this.chunks) {
       if (!chunk.compressed || !chunk.diary) {
         continue;
@@ -154,8 +181,7 @@ export class AutobiographicalStrategy implements ContextStrategy {
       totalTokens += pairTokens;
     }
 
-    // Then, add recent uncompressed messages
-    const messages = store.getAll();
+    // 3. Recent uncompressed messages
     const recentStart = this.getRecentWindowStart(store);
 
     for (let i = recentStart; i < messages.length; i++) {
@@ -185,8 +211,11 @@ export class AutobiographicalStrategy implements ContextStrategy {
    */
   private rebuildChunks(store: MessageStoreView): void {
     const messages = store.getAll();
+    const headEnd = this.getHeadWindowEnd(store);
     const recentStart = this.getRecentWindowStart(store);
-    const messagesToChunk = messages.slice(0, recentStart);
+    // Only chunk messages between head window and recent window
+    const chunkStart = Math.min(headEnd, recentStart);
+    const messagesToChunk = messages.slice(chunkStart, recentStart);
 
     // Preserve existing compressed chunks
     const existingCompressed = new Map<string, Chunk>();
@@ -203,7 +232,8 @@ export class AutobiographicalStrategy implements ContextStrategy {
 
     let currentChunk: StoredMessage[] = [];
     let currentTokens = 0;
-    let chunkStartIndex = 0;
+    // Absolute index into the full messages array
+    let chunkStartAbsolute = chunkStart;
 
     for (let i = 0; i < messagesToChunk.length; i++) {
       const msg = messagesToChunk[i];
@@ -225,8 +255,8 @@ export class AutobiographicalStrategy implements ContextStrategy {
       if (shouldClose) {
         const chunk = this.createChunk(
           this.chunks.length,
-          chunkStartIndex,
-          i + 1,
+          chunkStartAbsolute,
+          chunkStart + i + 1,
           currentChunk,
           currentTokens,
           existingCompressed
@@ -239,7 +269,7 @@ export class AutobiographicalStrategy implements ContextStrategy {
 
         currentChunk = [];
         currentTokens = 0;
-        chunkStartIndex = i + 1;
+        chunkStartAbsolute = chunkStart + i + 1;
       }
     }
 
@@ -247,8 +277,8 @@ export class AutobiographicalStrategy implements ContextStrategy {
     if (currentChunk.length >= 4) {
       const chunk = this.createChunk(
         this.chunks.length,
-        chunkStartIndex,
-        messagesToChunk.length,
+        chunkStartAbsolute,
+        chunkStart + messagesToChunk.length,
         currentChunk,
         currentTokens,
         existingCompressed
@@ -306,6 +336,26 @@ export class AutobiographicalStrategy implements ContextStrategy {
     }
 
     return 0;
+  }
+
+  /**
+   * Index of the first message AFTER the head window.
+   * Messages [0, headEnd) are preserved verbatim.
+   */
+  private getHeadWindowEnd(store: MessageStoreView): number {
+    if (this.config.headWindowTokens <= 0) return 0;
+
+    const messages = store.getAll();
+    let tokens = 0;
+
+    for (let i = 0; i < messages.length; i++) {
+      tokens += store.estimateTokens(messages[i]);
+      if (tokens > this.config.headWindowTokens) {
+        return i;
+      }
+    }
+
+    return messages.length;
   }
 
   private isChunkOldEnough(chunk: Chunk): boolean {
