@@ -18,7 +18,7 @@ import { DEFAULT_AUTOBIOGRAPHICAL_CONFIG } from '../types/index.js';
 /**
  * Chunk of messages to be compressed.
  */
-interface Chunk {
+export interface Chunk {
   /** Index in the chunk list */
   index: number;
   /** Starting message index (inclusive) */
@@ -35,6 +35,8 @@ interface Chunk {
   diary?: string;
   /** ID of the L1 SummaryEntry (hierarchical mode) */
   summaryId?: string;
+  /** Phase type tag (set by KnowledgeStrategy for semantic chunking) */
+  phaseType?: string;
 }
 
 /**
@@ -47,21 +49,21 @@ interface Chunk {
  * with anti-redundancy filtering and budget carryover.
  */
 export class AutobiographicalStrategy implements ContextStrategy {
-  readonly name = 'autobiographical';
+  readonly name: string = 'autobiographical';
 
   get maxMessageTokens(): number { return this.config.maxMessageTokens; }
 
-  private config: AutobiographicalConfig;
-  private chunks: Chunk[] = [];
-  private pendingCompression: Promise<void> | null = null;
-  private compressionQueue: number[] = [];
-  private _compressionCount = 0;
+  protected config: AutobiographicalConfig;
+  protected chunks: Chunk[] = [];
+  protected pendingCompression: Promise<void> | null = null;
+  protected compressionQueue: number[] = [];
+  protected _compressionCount = 0;
 
   // Hierarchical state
-  private summaries: SummaryEntry[] = [];
-  private summaryIdCounter = 0;
-  private mergeQueue: Array<{ level: SummaryLevel; sourceIds: string[] }> = [];
-  private nativeFormatter = new NativeFormatter();
+  protected summaries: SummaryEntry[] = [];
+  protected summaryIdCounter = 0;
+  protected mergeQueue: Array<{ level: SummaryLevel; sourceIds: string[] }> = [];
+  protected nativeFormatter = new NativeFormatter();
 
   constructor(config: Partial<AutobiographicalConfig> = {}) {
     this.config = { ...DEFAULT_AUTOBIOGRAPHICAL_CONFIG, ...config };
@@ -194,7 +196,7 @@ export class AutobiographicalStrategy implements ContextStrategy {
   // Legacy (single-level) path
   // ============================================================================
 
-  private selectLegacy(
+  protected selectLegacy(
     store: MessageStoreView,
     _log: ContextLogView,
     budget: TokenBudget
@@ -314,7 +316,7 @@ export class AutobiographicalStrategy implements ContextStrategy {
     return entries;
   }
 
-  private async compressChunkLegacy(chunk: Chunk, ctx: StrategyContext): Promise<void> {
+  protected async compressChunkLegacy(chunk: Chunk, ctx: StrategyContext): Promise<void> {
     if (!ctx.membrane) {
       throw new Error('No membrane instance for compression');
     }
@@ -362,7 +364,7 @@ export class AutobiographicalStrategy implements ContextStrategy {
     }
   }
 
-  private buildPriorContextLegacy(chunk: Chunk, ctx: StrategyContext): Array<{
+  protected buildPriorContextLegacy(chunk: Chunk, ctx: StrategyContext): Array<{
     participant: string;
     content: ContentBlock[];
   }> {
@@ -410,7 +412,7 @@ export class AutobiographicalStrategy implements ContextStrategy {
    *
    * Matches moltbot's gradient exclusion algorithm (worker.ts:293-447).
    */
-  private getAntiRedundantSummaries(excludeMessageIds?: Set<string>): {
+  protected getAntiRedundantSummaries(excludeMessageIds?: Set<string>): {
     shownL1: SummaryEntry[];
     shownL2: SummaryEntry[];
     shownL3: SummaryEntry[];
@@ -445,7 +447,7 @@ export class AutobiographicalStrategy implements ContextStrategy {
    * Compress a raw message chunk into an L1 summary using self-voice framing.
    * No system prompt — framing via message structure only.
    */
-  private async compressChunkHierarchical(chunk: Chunk, ctx: StrategyContext): Promise<void> {
+  protected async compressChunkHierarchical(chunk: Chunk, ctx: StrategyContext): Promise<void> {
     if (!ctx.membrane) {
       throw new Error('No membrane instance for compression');
     }
@@ -469,11 +471,12 @@ export class AutobiographicalStrategy implements ContextStrategy {
     }
 
     // Context Manager instruction with chunk content
+    const instruction = this.getCompressionInstruction(chunk, targetTokens);
     llmMessages.push({
       participant: 'Context Manager',
       content: [{
         type: 'text',
-        text: `[Context Manager] We are ready to form a long-term memory. Here is the conversation to remember:\n\n${chunkContent}\n\nStarting from my last message, please describe everything that has happened. Aim for about ${targetTokens} tokens. Describe it as you would to yourself, as if you are remembering what has happened.`,
+        text: `[Context Manager] We are ready to form a long-term memory. Here is the conversation to remember:\n\n${chunkContent}\n\n${instruction}`,
       }],
     });
 
@@ -510,6 +513,7 @@ export class AutobiographicalStrategy implements ContextStrategy {
           last: messageIds[messageIds.length - 1],
         },
         created: Date.now(),
+        phaseType: chunk.phaseType,
       };
 
       this.summaries.push(entry);
@@ -528,7 +532,7 @@ export class AutobiographicalStrategy implements ContextStrategy {
    * Check if unmerged summary counts exceed the merge threshold.
    * Enqueues merge operations if so.
    */
-  private checkMergeThreshold(): void {
+  protected checkMergeThreshold(): void {
     const threshold = this.config.mergeThreshold ?? 6;
 
     // Check L1 → L2
@@ -556,7 +560,7 @@ export class AutobiographicalStrategy implements ContextStrategy {
    * Merge N summaries at one level into a single summary at the next level.
    * Uses self-voice consolidation prompt.
    */
-  private async executeMerge(
+  protected async executeMerge(
     targetLevel: SummaryLevel,
     sourceIds: string[],
     ctx: StrategyContext
@@ -602,11 +606,12 @@ export class AutobiographicalStrategy implements ContextStrategy {
     }
 
     // Consolidation instruction
+    const mergeInstruction = this.getMergeInstruction(targetLevel, sources, targetTokens);
     llmMessages.push({
       participant: 'Context Manager',
       content: [{
         type: 'text',
-        text: `[Context Manager] Please consolidate the memories since my last message into a single cohesive memory. Aim for about ${targetTokens} tokens. Write as you would to yourself — this is your autobiography, capturing the arc of what happened.`,
+        text: `[Context Manager] ${mergeInstruction}`,
       }],
     });
 
@@ -666,7 +671,7 @@ export class AutobiographicalStrategy implements ContextStrategy {
    * Select context entries using hierarchical compression with budget carryover.
    * Matches moltbot's budget waterfall: L3 → L2 → L1 with unused budget flowing down.
    */
-  private selectHierarchical(store: MessageStoreView, budget: TokenBudget): ContextEntry[] {
+  protected selectHierarchical(store: MessageStoreView, budget: TokenBudget): ContextEntry[] {
     const entries: ContextEntry[] = [];
     const maxTokens = budget.maxTokens - budget.reserveForResponse;
     const messages = store.getAll();
@@ -733,15 +738,13 @@ export class AutobiographicalStrategy implements ContextStrategy {
     const l2Carryover = l2Effective - l2Used;
 
     // Phase 3: L1 within (L1 budget + carryover)
-    let l1Used = 0;
     const l1Effective = l1Budget + l2Carryover;
-    for (const s of shownL1) {
-      if (l1Used + s.tokens > l1Effective) break;
-      if (totalTokens + totalSummaryTokens + s.tokens > maxTokens) break;
-      selectedSummaries.push(s);
-      l1Used += s.tokens;
-      totalSummaryTokens += s.tokens;
-    }
+    const l1Remaining = maxTokens - totalTokens - totalSummaryTokens;
+    const { selected: l1Selected, tokensUsed: l1Used } = this.selectL1Summaries(
+      shownL1, l1Effective, l1Remaining
+    );
+    selectedSummaries.push(...l1Selected);
+    totalSummaryTokens += l1Used;
 
     // Emit summaries as a single Q&A pair
     if (selectedSummaries.length > 0) {
@@ -792,13 +795,57 @@ export class AutobiographicalStrategy implements ContextStrategy {
   }
 
   // ============================================================================
+  // Overridable hooks (for subclass customization)
+  // ============================================================================
+
+  /**
+   * Build the compression instruction for an L1 chunk.
+   * Override in subclasses for phase-aware prompts.
+   */
+  protected getCompressionInstruction(chunk: Chunk, targetTokens: number): string {
+    return `Starting from my last message, please describe everything that has happened. Aim for about ${targetTokens} tokens. Describe it as you would to yourself, as if you are remembering what has happened.`;
+  }
+
+  /**
+   * Build the merge instruction for combining summaries into a higher level.
+   * Override in subclasses for domain-specific merge prompts.
+   */
+  protected getMergeInstruction(
+    targetLevel: SummaryLevel,
+    sources: SummaryEntry[],
+    targetTokens: number
+  ): string {
+    return `Please consolidate the memories since my last message into a single cohesive memory. Aim for about ${targetTokens} tokens. Write as you would to yourself — this is your autobiography, capturing the arc of what happened.`;
+  }
+
+  /**
+   * Select L1 summaries within a budget. Returns selected summaries and tokens used.
+   * Override in subclasses for asymmetric budget allocation (e.g., cap research, prioritize synthesis).
+   */
+  protected selectL1Summaries(
+    shownL1: SummaryEntry[],
+    budget: number,
+    maxTokens: number
+  ): { selected: SummaryEntry[]; tokensUsed: number } {
+    const selected: SummaryEntry[] = [];
+    let used = 0;
+    for (const s of shownL1) {
+      if (used + s.tokens > budget) break;
+      if (used + s.tokens > maxTokens) break;
+      selected.push(s);
+      used += s.tokens;
+    }
+    return { selected, tokensUsed: used };
+  }
+
+  // ============================================================================
   // Shared utilities
   // ============================================================================
 
   /**
    * Rebuild chunk boundaries based on current messages.
    */
-  private rebuildChunks(store: MessageStoreView): void {
+  protected rebuildChunks(store: MessageStoreView): void {
     const messages = store.getAll();
     const headEnd = this.getHeadWindowEnd(store);
     const recentStart = this.getRecentWindowStart(store);
@@ -877,7 +924,7 @@ export class AutobiographicalStrategy implements ContextStrategy {
     }
   }
 
-  private createChunk(
+  protected createChunk(
     index: number,
     startIndex: number,
     endIndex: number,
@@ -916,11 +963,11 @@ export class AutobiographicalStrategy implements ContextStrategy {
     return chunk;
   }
 
-  private chunkKey(chunk: Chunk): string {
+  protected chunkKey(chunk: Chunk): string {
     return chunk.messages.map((m) => m.id).join(':');
   }
 
-  private getRecentWindowStart(store: MessageStoreView): number {
+  protected getRecentWindowStart(store: MessageStoreView): number {
     const messages = store.getAll();
     let tokens = 0;
 
@@ -943,7 +990,7 @@ export class AutobiographicalStrategy implements ContextStrategy {
    * Index of the first message AFTER the head window.
    * Messages [0, headEnd) are preserved verbatim.
    */
-  private getHeadWindowEnd(store: MessageStoreView): number {
+  protected getHeadWindowEnd(store: MessageStoreView): number {
     if (this.config.headWindowTokens <= 0) return 0;
 
     const messages = store.getAll();
@@ -964,19 +1011,19 @@ export class AutobiographicalStrategy implements ContextStrategy {
     return messages.length;
   }
 
-  private hasToolUse(message: StoredMessage): boolean {
+  protected hasToolUse(message: StoredMessage): boolean {
     return message.content.some(block => block.type === 'tool_use');
   }
 
-  private hasToolResult(message: StoredMessage): boolean {
+  protected hasToolResult(message: StoredMessage): boolean {
     return message.content.some(block => block.type === 'tool_result');
   }
 
-  private isChunkOldEnough(chunk: Chunk): boolean {
+  protected isChunkOldEnough(chunk: Chunk): boolean {
     return true;
   }
 
-  private formatChunkForCompression(chunk: Chunk): string {
+  protected formatChunkForCompression(chunk: Chunk): string {
     const lines: string[] = ['<earlier_in_conversation>'];
 
     for (const msg of chunk.messages) {
@@ -1003,7 +1050,7 @@ export class AutobiographicalStrategy implements ContextStrategy {
    * Collapse consecutive messages from the same participant into single messages.
    * Required because Claude API rejects consecutive same-role messages.
    */
-  private collapseConsecutiveMessages(
+  protected collapseConsecutiveMessages(
     messages: Array<{ participant: string; content: ContentBlock[] }>
   ): Array<{ participant: string; content: ContentBlock[] }> {
     if (messages.length === 0) return [];
@@ -1026,7 +1073,7 @@ export class AutobiographicalStrategy implements ContextStrategy {
     return result;
   }
 
-  private estimateTextOnlyTokens(msg: StoredMessage): number {
+  protected estimateTextOnlyTokens(msg: StoredMessage): number {
     let tokens = 0;
     for (const block of msg.content) {
       if (block.type === 'text') {
@@ -1044,7 +1091,7 @@ export class AutobiographicalStrategy implements ContextStrategy {
     return tokens;
   }
 
-  private estimateTokens(content: ContentBlock[]): number {
+  protected estimateTokens(content: ContentBlock[]): number {
     let tokens = 0;
     for (const block of content) {
       if (block.type === 'text') {
@@ -1057,7 +1104,7 @@ export class AutobiographicalStrategy implements ContextStrategy {
   /**
    * Truncate a message's content blocks to fit within maxMessageTokens.
    */
-  private truncateContent(content: ContentBlock[], maxTokens: number): ContentBlock[] {
+  protected truncateContent(content: ContentBlock[], maxTokens: number): ContentBlock[] {
     if (maxTokens <= 0) return content;
     const est = this.estimateTextOnlyTokens({ content } as StoredMessage);
     if (est <= maxTokens) return content;
