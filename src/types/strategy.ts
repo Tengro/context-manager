@@ -195,6 +195,43 @@ export interface SummaryEntry {
   mergedInto?: string;
   /** Creation timestamp */
   created: number;
+  /** Phase type tag (used by KnowledgeStrategy for asymmetric budget) */
+  phaseType?: string;
+}
+
+/**
+ * Phase type for knowledge extraction workflows.
+ */
+export type PhaseType = 'research' | 'synthesis' | 'lesson' | 'subagent';
+
+/**
+ * Configuration for the Knowledge strategy.
+ * Extends AutobiographicalConfig with phase-aware compression settings.
+ */
+export interface KnowledgeConfig extends AutobiographicalConfig {
+  /** Tool name prefixes that indicate research/retrieval activity.
+   *  Default: ['mcpl:', 'zulip:'] */
+  researchToolPrefixes?: string[];
+  /** Tool name prefixes that indicate subagent coordination.
+   *  Default: ['subagent:'] */
+  subagentToolPrefixes?: string[];
+  /** Exact tool names that indicate lesson capture.
+   *  Default: ['lessons:create', 'lessons:update'] */
+  lessonToolNames?: string[];
+
+  /** Max chunk tokens for research phases (default: 2x targetChunkTokens) */
+  maxResearchChunkTokens?: number;
+  /** Max chunk tokens for synthesis phases (default: 1.5x targetChunkTokens) */
+  maxSynthesisChunkTokens?: number;
+  /** Max chunk tokens for subagent phases (default: 2x targetChunkTokens) */
+  maxSubagentChunkTokens?: number;
+  /** Max chunk tokens for lesson phases (default: targetChunkTokens) */
+  maxLessonChunkTokens?: number;
+
+  /** Maximum fraction of L1 budget for research summaries (default: 0.3) */
+  researchL1BudgetCap?: number;
+  /** Minimum fraction of L1 budget for synthesis summaries (default: 0.4) */
+  synthesisL1BudgetFloor?: number;
 }
 
 /**
