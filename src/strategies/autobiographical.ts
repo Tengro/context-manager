@@ -16,6 +16,19 @@ import type {
 import { DEFAULT_AUTOBIOGRAPHICAL_CONFIG } from '../types/index.js';
 
 /**
+ * Surrogate-safe string slice. Avoids cutting between a UTF-16 surrogate pair
+ * which would produce invalid JSON ("no low surrogate in string" API errors).
+ */
+function safeSlice(str: string, start: number, end: number): string {
+  if (end >= str.length) return str.slice(start);
+  const code = str.charCodeAt(end);
+  if (code >= 0xDC00 && code <= 0xDFFF) {
+    return str.slice(start, end - 1);
+  }
+  return str.slice(start, end);
+}
+
+/**
  * Chunk of messages to be compressed.
  */
 export interface Chunk {
@@ -1122,22 +1135,30 @@ export class AutobiographicalStrategy implements ContextStrategy {
         } else {
           result.push({
             type: 'text',
-            text: block.text.slice(0, remaining) + '\n\n[truncated — original was ' +
+            text: safeSlice(block.text, 0, remaining) + '\n\n[truncated — original was ' +
               Math.ceil(block.text.length / 4) + ' tokens]',
           });
           remaining = 0;
         }
       } else if (block.type === 'tool_result') {
+        // tool_result blocks MUST always be included — the Anthropic API requires
+        // every tool_use to have a matching tool_result.  Dropping one causes a 400.
         if (typeof (block as any).content === 'string') {
           const text = (block as any).content as string;
-          if (text.length > remaining && remaining > 0) {
+          if (remaining <= 0) {
+            // Budget exhausted — include with minimal content to preserve pairing
             result.push({
               ...block,
-              content: text.slice(0, remaining) + '\n\n[truncated — original was ' +
+              content: '[content omitted — context budget exceeded]',
+            } as ContentBlock);
+          } else if (text.length > remaining) {
+            result.push({
+              ...block,
+              content: safeSlice(text, 0, remaining) + '\n\n[truncated — original was ' +
                 Math.ceil(text.length / 4) + ' tokens]',
             } as ContentBlock);
             remaining = 0;
-          } else if (remaining > 0) {
+          } else {
             result.push(block);
             remaining -= text.length;
           }
