@@ -293,6 +293,7 @@ export class MessageStore {
       case 'tool_use':
         return this.tokenEstimator(JSON.stringify(block.input)) + 20; // overhead for name, id
       case 'tool_result':
+        if (!block.content) return 0;
         if (typeof block.content === 'string') {
           return this.tokenEstimator(block.content);
         }
