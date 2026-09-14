@@ -41,7 +41,11 @@ import type {
   KvUnifiedConfig,
   SummaryEntry,
 } from '../types/strategy.js';
-import { CanonicalForestError } from '../adaptive/kv-unified.js';
+import {
+  CanonicalForestError,
+  ExactEnumerationLimitError,
+  SparseLabelCeilingError,
+} from '../adaptive/kv-unified.js';
 import type { CanonicalForestIssue } from '../adaptive/kv-unified.js';
 import { SummaryTree } from '../adaptive/summary-tree.js';
 import type { PickerChunk, PickerInputs } from '../adaptive/picker.js';
@@ -137,10 +141,14 @@ export const VALIDATION_KV_UNIFIED_CONFIG: Omit<
     continuityStableHalfLife: 10,
     continuityStableFloor: 0.25,
   },
-  tokenBucketSize: 100,
-  continuityBucketSize: 100,
-  fidelityBucketSize: 100,
-  labelCeiling: 10_000,
+  // Sized for real stores, not the unit-test toys these values started as: a
+  // 2.5-week production store blew a 10k label ceiling at 10,471. Coarse
+  // buckets + a high ceiling keep the validation solve cheap; and a ceiling
+  // overrun is tolerated anyway (see the solver-limit catch in validate).
+  tokenBucketSize: 2_000,
+  continuityBucketSize: 2_000,
+  fidelityBucketSize: 2_000,
+  labelCeiling: 500_000,
   adoptEpsilon: 0,
 };
 
@@ -152,8 +160,14 @@ export type TreeificationPolicy = 'strict' | 'treeify' | 'preserve-gaps';
 
 export interface PolicyOutcome {
   policy: TreeificationPolicy;
+  /** The forest canonicalized under this policy — the thing validate is for. */
   ok: boolean;
   issues: CanonicalForestIssue[];
+  /** Set when the forest built but the validation solve then hit a solver
+   *  capacity limit (label ceiling / enumeration cap). Irrelevant to the
+   *  migration verdict — the real deployment tunes its own solver config —
+   *  but reported so an operator knows the preview stopped early. */
+  solverLimit?: string;
 }
 
 export interface ValidateResult {
@@ -208,8 +222,19 @@ export async function validateStoreForKvUnified(opts: {
         });
         outcomes.push({ policy, ok: true, issues: [] });
       } catch (err) {
-        if (!(err instanceof CanonicalForestError)) throw err;
-        outcomes.push({ policy, ok: false, issues: [...err.issues] });
+        if (err instanceof CanonicalForestError) {
+          outcomes.push({ policy, ok: false, issues: [...err.issues] });
+        } else if (
+          err instanceof SparseLabelCeilingError ||
+          err instanceof ExactEnumerationLimitError
+        ) {
+          // The forest is constructed at solve start; a capacity limit hit
+          // afterwards proves the structure canonicalized. The deployment's
+          // own kvUnified config governs the real solve.
+          outcomes.push({ policy, ok: true, issues: [], solverLimit: err.message });
+        } else {
+          throw err;
+        }
       }
     }
     const recommendation = outcomes.find((o) => o.ok)?.policy ?? null;

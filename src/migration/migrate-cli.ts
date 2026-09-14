@@ -149,7 +149,9 @@ async function main(): Promise<void> {
             (i.summaryIds.length ? ` (summaries: ${i.summaryIds.slice(0, 5).join(', ')}${i.summaryIds.length > 5 ? ', …' : ''})` : ''),
         ),
         ...result.outcomes.map(
-          (o) => `policy ${o.policy}: ${o.ok ? 'OK' : `rejected (${o.issues.length} issue(s))`}`,
+          (o) =>
+            `policy ${o.policy}: ${o.ok ? 'OK' : `rejected (${o.issues.length} issue(s))`}` +
+            (o.solverLimit ? ` [forest built; validation solve stopped early: ${o.solverLimit}]` : ''),
         ),
         result.recommendation
           ? `recommendation: migrate with policy "${result.recommendation}"`
